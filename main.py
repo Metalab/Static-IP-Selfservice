@@ -29,7 +29,7 @@ def validate_ip(currentIpv4: str, allowedNetwork) -> bool:
         logging.error(f"Wrong format of IP address: {currentIpv4}")
         return False
 
-def validate_hostname(cells_text: list, hostnameIndex: int, tableLength: int, dnsPattern: str) -> str | bool:
+def validate_hostname(cells_text: list[str], hostnameIndex: int, tableLength: int, dnsPattern: str) -> str | bool:
     currentHostname: str | bool = False
     
     if tableLength != len(cells_text) or cells_text[hostnameIndex] == "":
@@ -40,18 +40,17 @@ def validate_hostname(cells_text: list, hostnameIndex: int, tableLength: int, dn
     else:
         currentHostname = cells_text[hostnameIndex]
         
-    if currentHostname:
+    if isinstance(currentHostname, str):
         if not re.match(dnsPattern, currentHostname):
             currentHostname = False
             
     return currentHostname
 
-def generate_file(table: dict[str, dict]):
+def generate_file(table: dict[str, dict]) -> None:
     with open("dhcp_hosts.conf", "w", encoding="utf-8") as f:
         for mac in sorted(table.keys()):
-            row_data = table[mac]
-            hostname = row_data["hostname"]
-            ipv4 = row_data["ipv4"]
+            hostname = table[mac]["hostname"]
+            ipv4 = table[mac]["ipv4"]
 
             f.write("config host\n")
             if hostname:
@@ -61,7 +60,7 @@ def generate_file(table: dict[str, dict]):
             if hostname:
                 f.write(f"    option dns '1'\n")
 
-def main():
+def main() -> None:
     url = "https://spsrakovnik.tech/hauner.vo.2023/PV"
     # url = "https://metalab.at/wiki/Netzwerk/Adressen"
 
@@ -83,7 +82,7 @@ def main():
     # if we got HTML
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
-        target_heading = soup.find("h2", string="Static prototype IPs")
+        target_heading = soup.find(lambda tag: tag.name == "h2" and tag.text == "Static prototype IPs") # there were some typing error, so we replaced it with lambda function and it works now
         if target_heading:
             target_table = target_heading.find_next("table")
             if target_table:
