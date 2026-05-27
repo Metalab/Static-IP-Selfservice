@@ -3,6 +3,79 @@ import re
 import ipaddress
 import logging
 from bs4 import BeautifulSoup
+import argparse
+
+globalUsedIpsv4: set[str] = set()
+globalUsedHostnames: set[str] = set()
+
+def parse_html_table(soup: BeautifulSoup, allowedNetwork, tableName: str) -> dict[str, dict]:
+    hostnameIndex: int = 0
+    macIndex: int = 0
+    ipv4Index: int = 0
+    ipv6Index: int = 0
+
+    tableLength: int = 0 # number of columns in the table
+    table: dict[str, dict] = {}
+
+    dnsPattern: str = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+    macPattern: str = r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
+
+    
+    target_heading = soup.find(lambda tag: tag.name == "h2" and tag.text == tableName) # there were some typing error, so we replaced it with lambda function and it works now
+    if target_heading:
+        target_table = target_heading.find_next("table")
+        if target_table:
+            print("Tabulka nalezena!\n")
+            j: int = 0
+            for row in target_table.find_all("tr"):
+                cells = row.find_all(["th", "td"])
+                cells_text = [cell.get_text(strip=True).lower() for cell in cells]
+
+                # getting indexes of each columns to know where is hostname, mac address, etc.
+                if j == 0:
+                    tableLength = len(cells_text)
+                    i = 0
+                    for cell in cells_text:
+                        if "hostname" in cell:
+                            hostnameIndex = i
+                        elif "mac" in cell:
+                            macIndex = i
+                        elif "ipv4" in cell:
+                            ipv4Index = i
+                        elif "ipv6" in cell:
+                            ipv6Index = i
+                        i += 1
+                    j += 1
+                    # skipping the heading of the table
+                    continue
+                
+                # saving data on the current row
+                currentMac: str = cells_text[macIndex]
+                currentIpv4: str = cells_text[ipv4Index]
+                currentIpv6: str = cells_text[ipv6Index]
+
+                # validating the mac address
+                if not validate_mac(currentMac, macPattern):
+                    continue
+
+                # validating the ip address
+                if not validate_ip(currentIpv4, allowedNetwork):
+                    continue
+    
+                # validation the hostname
+                currentHostname = validate_hostname(cells_text, hostnameIndex, tableLength, dnsPattern)
+
+                if currentHostname is None:
+                    continue
+
+                # saving data into the dict
+                table[currentMac] = {
+                    "ipv4": currentIpv4,
+                    "ipv6": currentIpv6,
+                    "hostname": currentHostname,
+                }
+
+    return table
 
 def validate_mac(currentMac: str, macPattern: str) -> bool:
     if not re.match(macPattern, currentMac):
@@ -21,16 +94,20 @@ def validate_ip(currentIpv4: str, allowedNetwork) -> bool:
     try:
         ip_object = ipaddress.ip_address(currentIpv4)
         if ip_object not in allowedNetwork:
-            logging.error(f"IP adresa {currentIpv4} doesn't belong into our network")
+            logging.error(f"IP address {currentIpv4} doesn't belong into our network")
             return False
+        elif currentIpv4 in globalUsedIpsv4:
+            logging.error(f"Device with IP address {currentIpv4} has already been found")
+            return False
+        globalUsedIpsv4.add(currentIpv4)
         return True
     # catch in C#
     except ValueError:
         logging.error(f"Wrong format of IP address: {currentIpv4}")
         return False
 
-def validate_hostname(cells_text: list[str], hostnameIndex: int, tableLength: int, dnsPattern: str) -> str | bool:
-    currentHostname: str | bool = False
+def validate_hostname(cells_text: list[str], hostnameIndex: int, tableLength: int, dnsPattern: str) -> str | bool | None:
+    currentHostname: str | bool | None = False
     
     if tableLength != len(cells_text) or cells_text[hostnameIndex] == "":
         currentHostname = False
@@ -43,6 +120,11 @@ def validate_hostname(cells_text: list[str], hostnameIndex: int, tableLength: in
     if isinstance(currentHostname, str):
         if not re.match(dnsPattern, currentHostname):
             currentHostname = False
+        elif currentHostname in globalUsedHostnames:
+            logging.error(f"Dublicate hostname found: {currentHostname}")
+            return None
+        else:
+            globalUsedHostnames.add(currentHostname)        
             
     return currentHostname
 
@@ -61,79 +143,27 @@ def generate_file(table: dict[str, dict]) -> None:
                 f.write(f"    option dns '1'\n")
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--loglevel", default="ERROR")
+    args = parser.parse_args()
+    numeric_level = getattr(logging, args.loglevel.upper(), None)
+    if not isinstance(numeric_level, int):
+        print(f"Invalid log level: {args.loglevel}")
+        return
+    logging.basicConfig(level=numeric_level)
+
     url = "https://spsrakovnik.tech/hauner.vo.2023/PV"
     # url = "https://metalab.at/wiki/Netzwerk/Adressen"
-
     allowedNetwork = ipaddress.ip_network("192.168.0.0/16")
-
-    hostnameIndex: int = 0
-    macIndex: int = 0
-    ipv4Index: int = 0
-    ipv6Index: int = 0
-
-    tableLength: int = 0 # number of columns in the table
-    table: dict[str, dict] = {}
-
-    dnsPattern: str = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
-    macPattern: str = r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
-
+    tableName = "Static prototype IPs"
     response = requests.get(url)
 
     # if we got HTML
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
-        target_heading = soup.find(lambda tag: tag.name == "h2" and tag.text == "Static prototype IPs") # there were some typing error, so we replaced it with lambda function and it works now
-        if target_heading:
-            target_table = target_heading.find_next("table")
-            if target_table:
-                print("Tabulka nalezena!\n")
-                j: int = 0
-                for row in target_table.find_all("tr"):
-                    cells = row.find_all(["th", "td"])
-                    cells_text = [cell.get_text(strip=True).lower() for cell in cells]
+        prototypes = parse_html_table(soup, allowedNetwork, tableName)
+        generate_file(prototypes)
 
-                    # getting indexes of each columns to know where is hostname, mac address, etc.
-                    if j == 0:
-                        tableLength = len(cells_text)
-                        i = 0
-                        for cell in cells_text:
-                            if "hostname" in cell:
-                                hostnameIndex = i
-                            elif "mac" in cell:
-                                macIndex = i
-                            elif "ipv4" in cell:
-                                ipv4Index = i
-                            elif "ipv6" in cell:
-                                ipv6Index = i
-                            i += 1
-                        j += 1
-                        # skipping the heading of the table
-                        continue
-                    
-                    # saving data on the current row
-                    currentMac: str = cells_text[macIndex]
-                    currentIpv4: str = cells_text[ipv4Index]
-                    currentIpv6: str = cells_text[ipv6Index]
-
-                    # validating the mac address
-                    if not validate_mac(currentMac, macPattern):
-                        continue
-
-                    # validating the ip address
-                    if not validate_ip(currentIpv4, allowedNetwork):
-                        continue
-        
-                    # validation the hostname
-                    currentHostname = validate_hostname(cells_text, hostnameIndex, tableLength, dnsPattern)
-
-                    # saving data into the dict
-                    table[currentMac] = {
-                        "ipv4": currentIpv4,
-                        "ipv6": currentIpv6,
-                        "hostname": currentHostname,
-                    }
-
-                generate_file(table)
     else:
         print(f"Chyba při stahování stránky. Status kód: {response.status_code}")
 
